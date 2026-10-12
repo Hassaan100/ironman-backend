@@ -9,6 +9,7 @@ const TrainerSchema = new mongoose.Schema(
     specialty: { type: String, default: 'General Fitness / Bodybuilding' },
     salary: { type: Number, default: 0 },
     commissionPercent: { type: Number, default: 0 },
+    fee: { type: Number, default: 3000 },
     status: {
       type: String,
       enum: ['active', 'inactive', 'on_leave'],

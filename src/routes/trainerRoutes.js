@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
   getTrainers,
+  getTrainerActiveMembers,
   createTrainer,
   updateTrainer,
   deleteTrainer,
@@ -12,6 +13,7 @@ const router = Router();
 router.use(authenticate, requireGymContext);
 
 router.get('/', getTrainers);
+router.get('/:id/active-members', getTrainerActiveMembers);
 router.post('/', createTrainer);
 router.put('/:id', updateTrainer);
 router.delete('/:id', deleteTrainer);

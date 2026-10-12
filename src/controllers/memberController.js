@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { Member } from '../models/Member.js';
 import { Payment } from '../models/Payment.js';
 import { Plan } from '../models/Plan.js';
+import { Trainer } from '../models/Trainer.js';
 
 export const getMembers = async (req, res) => {
   try {
@@ -79,7 +80,7 @@ export const createMember = async (req, res) => {
     }
 
     // 1. Authoritative plan lookup and pricing
-    let baseFee = 5000;
+    let planFee = 5000;
     let authoritativePlan = null;
     if (plan) {
       authoritativePlan = await Plan.findOne({
@@ -93,16 +94,40 @@ export const createMember = async (req, res) => {
     }
 
     if (authoritativePlan) {
-      baseFee = Number(authoritativePlan.price);
+      planFee = Number(authoritativePlan.price);
     } else if (originalFee !== undefined && !isNaN(Number(originalFee))) {
-      baseFee = Number(originalFee);
+      planFee = Number(originalFee);
     } else if (totalAmount !== undefined && !isNaN(Number(totalAmount))) {
-      baseFee = Number(totalAmount);
+      planFee = Number(totalAmount);
     }
 
-    // Support custom pricing if admin explicitly customized the original fee
+    // 2. Personal Trainer Lookup & Fee calculation
+    let isWithTrainer = Boolean(withTrainer);
+    let assignedTrainer = null;
+    let trainerFee = 0;
+
+    if (isWithTrainer && trainerId) {
+      assignedTrainer = await Trainer.findOne({ _id: trainerId, gymId });
+      if (assignedTrainer) {
+        trainerFee = Number(assignedTrainer.fee !== undefined ? assignedTrainer.fee : 3000);
+      } else {
+        isWithTrainer = false;
+        trainerFee = 0;
+      }
+    } else {
+      isWithTrainer = false;
+      trainerFee = 0;
+    }
+
+    // Calculated base fee is membership plan fee + trainer fee (when personal trainer is enabled)
+    let baseFee = planFee + trainerFee;
+
+    // Support custom pricing override if admin explicitly set custom original fee
     if (originalFee !== undefined && !isNaN(Number(originalFee))) {
-      baseFee = Number(originalFee);
+      const customFee = Number(originalFee);
+      if (customFee >= 0) {
+        baseFee = customFee;
+      }
     }
 
     if (baseFee < 0) {
@@ -207,9 +232,10 @@ export const createMember = async (req, res) => {
       address,
       emergencyContact,
       plan: authoritativePlan ? authoritativePlan.planType : (plan || 'monthly'),
-      withTrainer: Boolean(withTrainer),
-      trainerId: trainerId || undefined,
-      trainerName: trainerName || '',
+      withTrainer: isWithTrainer,
+      trainerId: isWithTrainer && assignedTrainer ? assignedTrainer._id : undefined,
+      trainerName: isWithTrainer && assignedTrainer ? assignedTrainer.name : '',
+      trainerFee: isWithTrainer ? trainerFee : 0,
       startDate: now,
       expiryDate,
       status: dueAmount > 0 ? 'due' : 'active',
@@ -230,6 +256,9 @@ export const createMember = async (req, res) => {
       let paymentNotes = dueAmount > 0
         ? 'Initial admission fee payment (partial advance)'
         : 'Initial admission fee payment (full)';
+      if (isWithTrainer && assignedTrainer) {
+        paymentNotes += ` [Personal Trainer: ${assignedTrainer.name} (+PKR ${trainerFee})]`;
+      }
       if (calculatedDiscountAmount > 0) {
         paymentNotes += ` [Discount: PKR ${calculatedDiscountAmount} (${normDiscountType === 'percentage' ? `${finalDiscountValue}%` : 'Fixed Amount'})]`;
       }
@@ -291,6 +320,8 @@ export const renewMembership = async (req, res) => {
       paidAmount,
       paymentMethod = 'cash',
       paymentMode = 'full',
+      withTrainer,
+      trainerId,
       notes,
     } = req.body;
 
@@ -333,10 +364,40 @@ export const renewMembership = async (req, res) => {
     member.paidAmount = (Number(member.paidAmount) || 0) + paid;
     member.dueAmount = updatedDueAmount;
     member.status = updatedDueAmount > 0 ? 'due' : 'active';
+
+    // Handle personal trainer assignment on renewal
+    if (withTrainer !== undefined) {
+      if (Boolean(withTrainer)) {
+        let assignedTrainer = null;
+        if (trainerId) {
+          assignedTrainer = await Trainer.findOne({ _id: trainerId, gymId: req.gymId });
+        } else if (member.trainerId) {
+          assignedTrainer = await Trainer.findOne({ _id: member.trainerId, gymId: req.gymId });
+        }
+        if (assignedTrainer) {
+          const renewTrainerFee = Number(assignedTrainer.fee !== undefined ? assignedTrainer.fee : 3000);
+          member.withTrainer = true;
+          member.trainerId = assignedTrainer._id;
+          member.trainerName = assignedTrainer.name;
+          member.trainerFee = renewTrainerFee;
+        }
+      } else {
+        member.withTrainer = false;
+        member.trainerId = undefined;
+        member.trainerName = '';
+        member.trainerFee = 0;
+      }
+    }
+
     await member.save();
 
     let payment = null;
     if (paid > 0) {
+      let paymentNotes = notes || (newRenewalDue > 0 ? `Membership renewal (partial advance)` : `Membership renewal for ${durationDays} days`);
+      if (member.withTrainer && member.trainerName) {
+        paymentNotes += ` [Personal Trainer: ${member.trainerName} (+PKR ${member.trainerFee})]`;
+      }
+
       payment = await Payment.create({
         gymId: req.gymId,
         memberId: member.memberId,
@@ -348,7 +409,8 @@ export const renewMembership = async (req, res) => {
         invoiceNo: `INV-${Date.now().toString().slice(-6)}`,
         receivedBy: req.user?.name || 'Admin',
         paidOn: new Date(),
-        notes: notes || (newRenewalDue > 0 ? `Membership renewal (partial advance)` : `Membership renewal for ${durationDays} days`),
+        notes: paymentNotes,
+        originalFee: fee,
       });
     }
 

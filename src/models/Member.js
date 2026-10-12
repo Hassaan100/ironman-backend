@@ -17,6 +17,7 @@ const MemberSchema = new mongoose.Schema(
     withTrainer: { type: Boolean, default: false },
     trainerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Trainer', required: false },
     trainerName: { type: String, default: '' },
+    trainerFee: { type: Number, default: 0 },
     startDate: { type: Date, default: Date.now },
     expiryDate: { type: Date, required: true },
     status: {
