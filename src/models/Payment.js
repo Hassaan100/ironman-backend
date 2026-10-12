@@ -21,6 +21,13 @@ const PaymentSchema = new mongoose.Schema(
     receivedBy: { type: String, default: 'Admin' },
     paidOn: { type: Date, default: Date.now },
     notes: { type: String, default: '' },
+    originalFee: { type: Number, default: 0 },
+    discountType: {
+      type: String,
+      enum: ['percentage', 'fixed', 'none'],
+      default: 'none',
+    },
+    discountAmount: { type: Number, default: 0 },
   },
   { timestamps: true }
 );

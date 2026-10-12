@@ -101,6 +101,12 @@ export const updateGym = async (req, res) => {
     if (!gym) {
       return res.status(404).json({ success: false, message: 'Gym not found' });
     }
+    if (req.body.ownerName && req.body.ownerName.trim()) {
+      await User.updateMany(
+        { gymId: gym._id, role: 'owner' },
+        { $set: { name: req.body.ownerName.trim() } }
+      );
+    }
     res.json({ success: true, message: 'Gym updated successfully', gym });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

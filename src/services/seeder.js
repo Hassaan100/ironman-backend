@@ -41,6 +41,7 @@ const seedDatabase = async () => {
     if (!demoGym) {
       demoGym = await Gym.create({
         name: 'Iron Man Hardcore Fitness',
+        ownerName: 'Imran',
         slug: 'ironman-flagship',
         branchCode: 'GYM-001',
         address: 'Main Boulevard, Gulberg III, Lahore',
@@ -58,13 +59,16 @@ const seedDatabase = async () => {
         },
       });
       console.log(`[Seeder] Created Flagship Gym: ${demoGym.name}`);
+    } else if (!demoGym.ownerName) {
+      demoGym.ownerName = 'Imran';
+      await demoGym.save();
     }
 
     // 3. Seed Gym Owner & Staff with explicit gymId
     let gymOwner = await User.findOne({ email: 'owner@ironman.com' });
     if (!gymOwner) {
       gymOwner = await User.create({
-        name: 'Tariq Butt',
+        name: 'Imran',
         email: 'owner@ironman.com',
         password: 'Password@123',
         role: 'owner',

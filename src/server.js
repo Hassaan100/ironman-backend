@@ -21,6 +21,8 @@ import planRoutes from './routes/planRoutes.js';
 import reportRoutes from './routes/reportRoutes.js';
 import uploadRoutes from './routes/uploadRoutes.js';
 import cashClosingRoutes from './routes/cashClosingRoutes.js';
+import reminderRoutes from './routes/reminderRoutes.js';
+import settingsRoutes from './routes/settingsRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -89,6 +91,8 @@ app.use('/api/plans', planRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/cash-closing', cashClosingRoutes);
+app.use('/api/reminders', reminderRoutes);
+app.use('/api/settings', settingsRoutes);
 
 // Centralized Error Handler
 app.use(errorHandler);
