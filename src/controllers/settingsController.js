@@ -39,6 +39,7 @@ export const getSettings = async (req, res) => {
       User.find({ gymId }).select('-password').sort({ createdAt: -1 }),
       AuditLog.find({ gymId }).sort({ createdAt: -1 }).limit(25),
       User.findOne({ gymId, role: 'owner' }),
+      User.findOne({ gymId, role: 'owner' }),
     ]);
 
     const gymData = gym.toObject();

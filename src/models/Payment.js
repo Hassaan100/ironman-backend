@@ -21,13 +21,19 @@ const PaymentSchema = new mongoose.Schema(
     receivedBy: { type: String, default: 'Admin' },
     paidOn: { type: Date, default: Date.now },
     notes: { type: String, default: '' },
+    planFee: { type: Number, default: 0 },
+    trainerFee: { type: Number, default: 0 },
+    trainerName: { type: String, default: '' },
     originalFee: { type: Number, default: 0 },
     discountType: {
       type: String,
       enum: ['percentage', 'fixed', 'none'],
       default: 'none',
     },
+    discountValue: { type: Number, default: 0 },
     discountAmount: { type: Number, default: 0 },
+    finalFee: { type: Number, default: 0 },
+    dueRemaining: { type: Number, default: 0 },
   },
   { timestamps: true }
 );

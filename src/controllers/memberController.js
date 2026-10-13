@@ -9,6 +9,37 @@ export const getMembers = async (req, res) => {
     const gymId = req.gymId;
     const { q, status, plan, limit = 100, page = 1 } = req.query;
 
+    const now = new Date();
+
+    // Auto-sync status for members whose expiryDate has passed (and not frozen)
+    await Member.updateMany(
+      {
+        gymId,
+        expiryDate: { $lt: now },
+        status: { $nin: ['expired', 'frozen'] },
+      },
+      { $set: { status: 'expired' } }
+    );
+
+    // Ensure legacy members with undefined status and future expiryDate are set to active (or due if pending dues)
+    await Member.updateMany(
+      {
+        gymId,
+        expiryDate: { $gte: now },
+        $or: [{ status: { $exists: false } }, { status: null }, { status: '' }],
+        dueAmount: { $gt: 0 },
+      },
+      { $set: { status: 'due' } }
+    );
+    await Member.updateMany(
+      {
+        gymId,
+        expiryDate: { $gte: now },
+        $or: [{ status: { $exists: false } }, { status: null }, { status: '' }],
+      },
+      { $set: { status: 'active' } }
+    );
+
     const filter = { gymId };
     if (status && status !== 'all') {
       filter.status = status;
@@ -252,6 +283,7 @@ export const createMember = async (req, res) => {
     });
 
     // If payment was made (paid > 0), log transaction in Payment ledger
+    let payment = null;
     if (paid > 0) {
       let paymentNotes = dueAmount > 0
         ? 'Initial admission fee payment (partial advance)'
@@ -263,7 +295,7 @@ export const createMember = async (req, res) => {
         paymentNotes += ` [Discount: PKR ${calculatedDiscountAmount} (${normDiscountType === 'percentage' ? `${finalDiscountValue}%` : 'Fixed Amount'})]`;
       }
 
-      await Payment.create({
+      payment = await Payment.create({
         gymId,
         memberId: member.memberId,
         memberName: member.name,
@@ -275,13 +307,19 @@ export const createMember = async (req, res) => {
         receivedBy: req.user?.name || 'Admin',
         paidOn: now,
         notes: paymentNotes,
+        planFee: planFee,
+        trainerFee: isWithTrainer ? trainerFee : 0,
+        trainerName: isWithTrainer && assignedTrainer ? assignedTrainer.name : '',
         originalFee: baseFee,
         discountType: normDiscountType,
+        discountValue: finalDiscountValue,
         discountAmount: calculatedDiscountAmount,
+        finalFee: finalFee,
+        dueRemaining: dueAmount,
       });
     }
 
-    res.status(201).json({ success: true, message: 'Member created successfully', member });
+    res.status(201).json({ success: true, message: 'Member created successfully', member, payment });
   } catch (error) {
     if (error.code === 11000) {
       return res.status(409).json({
@@ -398,6 +436,7 @@ export const renewMembership = async (req, res) => {
         paymentNotes += ` [Personal Trainer: ${member.trainerName} (+PKR ${member.trainerFee})]`;
       }
 
+      const renTrainerFee = member.withTrainer ? (Number(member.trainerFee) || 0) : 0;
       payment = await Payment.create({
         gymId: req.gymId,
         memberId: member.memberId,
@@ -410,7 +449,12 @@ export const renewMembership = async (req, res) => {
         receivedBy: req.user?.name || 'Admin',
         paidOn: new Date(),
         notes: paymentNotes,
+        planFee: Math.max(0, fee - renTrainerFee),
+        trainerFee: renTrainerFee,
+        trainerName: member.withTrainer ? (member.trainerName || '') : '',
         originalFee: fee,
+        finalFee: fee,
+        dueRemaining: updatedDueAmount,
       });
     }
 

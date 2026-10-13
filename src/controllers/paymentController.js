@@ -1,6 +1,8 @@
+import mongoose from 'mongoose';
 import { Payment } from '../models/Payment.js';
 import { Member } from '../models/Member.js';
 import { Plan } from '../models/Plan.js';
+import { Gym } from '../models/Gym.js';
 
 export const getPayments = async (req, res) => {
   try {
@@ -19,8 +21,8 @@ export const getPayments = async (req, res) => {
     }
 
     const skip = (Number(page) - 1) * Number(limit);
-    const [payments, total, totalSum] = await Promise.all([
-      Payment.find(filter).sort({ paidOn: -1 }).skip(skip).limit(Number(limit)),
+    const [rawPayments, total, totalSum] = await Promise.all([
+      Payment.find(filter).sort({ paidOn: -1 }).skip(skip).limit(Number(limit)).lean(),
       Payment.countDocuments(filter),
       Payment.aggregate([
         { $match: filter },
@@ -28,12 +30,32 @@ export const getPayments = async (req, res) => {
       ]),
     ]);
 
+    const memberIds = [...new Set(rawPayments.map((p) => p.memberId))];
+    const members = await Member.find({ gymId, memberId: { $in: memberIds } })
+      .select('memberId dueAmount discountAmount discountType status')
+      .lean();
+    const memberMap = new Map(members.map((m) => [m.memberId, m]));
+
+    const enrichedPayments = rawPayments.map((p) => {
+      const m = memberMap.get(p.memberId);
+      const dueRemaining = p.dueRemaining !== undefined ? Number(p.dueRemaining) : (m ? Number(m.dueAmount || 0) : 0);
+      const discountAmount = Number(p.discountAmount !== undefined ? p.discountAmount : (m?.discountAmount || 0));
+      const discountType = p.discountType || m?.discountType || 'none';
+      return {
+        ...p,
+        dueRemaining,
+        discountAmount,
+        discountType,
+        memberStatus: m?.status || 'active',
+      };
+    });
+
     res.json({
       success: true,
       total,
       totalCollected: totalSum[0]?.total || 0,
-      count: payments.length,
-      payments,
+      count: enrichedPayments.length,
+      payments: enrichedPayments,
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -175,6 +197,7 @@ export const recordPayment = async (req, res) => {
         : ''
     );
 
+    const recTrainerFee = (paymentType === 'renewal' && member.withTrainer) ? (Number(member.trainerFee) || 0) : 0;
     const payment = await Payment.create({
       gymId,
       memberId: member.memberId,
@@ -187,7 +210,12 @@ export const recordPayment = async (req, res) => {
       receivedBy: req.user?.name || 'Admin',
       paidOn: new Date(),
       notes: paymentNotes,
+      planFee: paymentType === 'renewal' ? Math.max(0, renewalFee - recTrainerFee) : paidNum,
+      trainerFee: recTrainerFee,
+      trainerName: (paymentType === 'renewal' && member.withTrainer) ? (member.trainerName || '') : '',
       originalFee: paymentType === 'renewal' ? renewalFee : paidNum,
+      finalFee: paymentType === 'renewal' ? renewalFee : paidNum,
+      dueRemaining: member.dueAmount,
     });
 
     let successMsg = 'Payment recorded successfully';
@@ -217,3 +245,179 @@ export const recordPayment = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
+/**
+ * GET /api/payments/invoice/:idOrInvoiceNo
+ * Retrieves complete invoice details for a payment transaction.
+ */
+export const getPaymentInvoice = async (req, res) => {
+  try {
+    const gymId = req.gymId;
+    const { idOrInvoiceNo } = req.params;
+
+    if (!idOrInvoiceNo) {
+      return res.status(400).json({ success: false, message: 'Invoice Number or Payment ID is required' });
+    }
+
+    const isObjectId = mongoose.Types.ObjectId.isValid(idOrInvoiceNo);
+    const query = {
+      gymId,
+      $or: [
+        ...(isObjectId ? [{ _id: idOrInvoiceNo }] : []),
+        { invoiceNo: idOrInvoiceNo.trim() },
+      ],
+    };
+
+    const payment = await Payment.findOne(query);
+    if (!payment) {
+      return res.status(404).json({ success: false, message: `Invoice "${idOrInvoiceNo}" not found` });
+    }
+
+    const [gym, member, plan] = await Promise.all([
+      Gym.findById(payment.gymId).lean(),
+      Member.findOne({ gymId: payment.gymId, memberId: payment.memberId }).lean(),
+      Plan.findOne({ gymId: payment.gymId, planType: payment.plan }).lean(),
+    ]);
+
+    const isDueClearance = payment.paymentType === 'due_clearance';
+    const isAdmission = payment.paymentType === 'membership';
+    const isRenewal = payment.paymentType === 'renewal';
+
+    // Standard plan price from Plan collection (default to 5000 if monthly)
+    const standardPlanPrice = Number(plan?.price) || (payment.plan === 'monthly' ? 5000 : 5000);
+
+    // 1. Trainer info for THIS transaction
+    let trainerFee = 0;
+    let trainerName = '';
+
+    if (isDueClearance) {
+      trainerFee = 0;
+      trainerName = '';
+    } else if (payment.trainerFee !== undefined && payment.trainerFee > 0) {
+      trainerFee = Number(payment.trainerFee);
+      trainerName = payment.trainerName || member?.trainerName || '';
+    } else if (isAdmission && member?.withTrainer && Number(member?.trainerFee) > 0) {
+      trainerFee = Number(member.trainerFee);
+      trainerName = member.trainerName || '';
+    } else if (isRenewal && Number(payment.originalFee) > standardPlanPrice) {
+      // If renewal fee was higher than plan price, the difference was the trainer fee
+      trainerFee = Number(payment.originalFee) - standardPlanPrice;
+      trainerName = member?.trainerName || '';
+    }
+
+    // 2. Standalone Membership Plan Fee (always the actual plan fee itself, e.g. 5,000)
+    let planFee = 0;
+    if (isDueClearance) {
+      planFee = Number(payment.amount || 0);
+    } else if (payment.planFee !== undefined && payment.planFee > 0) {
+      planFee = Number(payment.planFee);
+    } else {
+      planFee = standardPlanPrice;
+    }
+
+    // 3. Gross total for THIS transaction before discount
+    const grossTotal = isDueClearance
+      ? planFee
+      : (planFee + trainerFee);
+
+    // 4. Discounts for THIS transaction
+    let discountAmount = 0;
+    let discountType = 'none';
+    let discountValue = 0;
+
+    if (isDueClearance) {
+      discountAmount = 0;
+      discountType = 'none';
+      discountValue = 0;
+    } else if (payment.discountAmount !== undefined && payment.discountAmount > 0) {
+      discountAmount = Number(payment.discountAmount);
+      discountType = payment.discountType || 'none';
+      discountValue = Number(payment.discountValue || 0);
+    } else if (isAdmission && Number(member?.discountAmount) > 0) {
+      // Legacy admission record fallback
+      discountAmount = Number(member.discountAmount);
+      discountType = member.discountType || 'none';
+      discountValue = Number(member.discountValue || 0);
+    }
+
+    // 5. Total package payable for THIS transaction
+    const totalPackageFee = isDueClearance
+      ? planFee
+      : Math.max(0, grossTotal - discountAmount);
+
+    // 6. Current transaction payment amount received
+    const amountReceived = Number(payment.amount || 0);
+
+    // 7. Remaining dues for member
+    const remainingDues = member ? Number(member.dueAmount || 0) : Math.max(0, totalPackageFee - amountReceived);
+
+    const isFullPayment = remainingDues === 0;
+    const paymentStatus = isFullPayment ? 'PAID IN FULL' : 'PARTIAL PAYMENT';
+    const hasTrainer = trainerFee > 0;
+
+    res.json({
+      success: true,
+      invoice: {
+        invoiceNo: payment.invoiceNo,
+        paymentId: payment._id,
+        date: payment.paidOn,
+        amountPaid: amountReceived,
+        paymentMethod: payment.method,
+        paymentType: payment.paymentType,
+        planType: payment.plan,
+        planName: plan?.name || (payment.plan ? payment.plan.toUpperCase() : 'STANDARD'),
+        receivedBy: payment.receivedBy || 'Front Desk Reception',
+        notes: payment.notes || '',
+        gym: {
+          name: gym?.name || 'Iron Man Hardcore Fitness',
+          ownerName: gym?.ownerName || 'Imran',
+          branchCode: gym?.branchCode || 'GYM-001',
+          address: gym?.address ? (gym?.city ? `${gym.address}, ${gym.city}` : gym.address) : 'Main Boulevard, Gulberg III, Lahore',
+          phone: gym?.phone || '+92 321 1234567',
+          email: gym?.email || 'lahore@ironmangym.com',
+          website: gym?.website || 'www.ironmangym.com',
+          logoUrl: gym?.logoUrl || '',
+          currency: gym?.currency || 'PKR',
+          currencySymbol: gym?.currencySymbol || 'PKR',
+          cancellationPolicy: gym?.settings?.cancellationPolicy || 'Memberships are non-refundable once activated.',
+        },
+        member: {
+          memberId: member?.memberId || payment.memberId,
+          name: member?.name || payment.memberName,
+          phone: member?.phone || '',
+          cnic: member?.cnic || '',
+          address: member?.address || '',
+          plan: member?.plan || payment.plan,
+          startDate: member?.startDate || null,
+          expiryDate: member?.expiryDate || null,
+          status: member?.status || 'active',
+          withTrainer: hasTrainer,
+          trainerName,
+          trainerFee,
+          totalAmount: totalPackageFee,
+          paidAmount: member?.paidAmount || amountReceived,
+          dueAmount: remainingDues,
+        },
+        financials: {
+          planFee,
+          baseFee: planFee,
+          trainerFee,
+          trainerName,
+          grossTotal,
+          discountType,
+          discountValue,
+          discountAmount,
+          subtotal: grossTotal,
+          totalPackageFee,
+          amountReceived,
+          remainingDues,
+          isFullPayment,
+          paymentStatus,
+        },
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
